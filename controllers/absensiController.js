@@ -1,10 +1,15 @@
+// controllers/absensiController.js
 const db = require('../config/db');
 const geolib = require('geolib');
+const { generateTanggalKerja, getJamKerja } = require('../utils/dateUtils');
+const moment = require('moment');
+
+
 
 // Lokasi kantor PTB Manyar
 const kantorLat = -7.120436;
 const kantorLng = 112.600460;
-const radiusMeter = 2000;
+const radiusMeter = 20000;
 
 // =====================
 // ABSEN MASUK
@@ -22,162 +27,442 @@ exports.absenMasuk = (req, res) => {
   );
 
   if (distance > radiusMeter) {
-    return res.status(403).json({
-      message: 'Diluar radius lokasi kantor',
-      distance
-    });
+    return res.status(403).json({ message: 'Diluar radius lokasi kantor', distance });
+  }
+
+  const today = moment();
+  const hari = today.day(); // 0 = Minggu, 6 = Sabtu
+  const tanggalHariIni = today.format('YYYY-MM-DD');
+
+  if (hari === 0) {
+    return res.status(403).json({ message: 'Hari Minggu adalah hari libur' });
   }
 
   const lokasi = `${latitude},${longitude}`;
-  const sqlCek = `SELECT * FROM absensi WHERE pegawai_id = ? AND tanggal = CURDATE()`;
+  const sqlCek = `SELECT * FROM absensi WHERE pegawai_id = ? AND tanggal = ?`;
 
-  db.query(sqlCek, [user.pegawai_id], (err, result) => {
+  db.query(sqlCek, [user.pegawai_id, tanggalHariIni], (err, result) => {
     if (err) return res.status(500).json({ message: 'Error cek absensi', error: err });
 
     if (result.length > 0) {
-      if (result[0].jam_keluar) {
-        return res.status(409).json({
-          message: 'Sudah absen masuk dan keluar hari ini',
-          type: 'sudah_keluar',
-          absen: result[0]
-        });
-      } else {
-        return res.status(409).json({
-          message: 'Sudah absen masuk hari ini',
-          type: 'sudah_masuk',
-          absen: result[0]
-        });
-      }
+      const data = result[0];
+      const status = data.jam_keluar ? 'Hadir' : 'Belum Pulang';
+      const persen = data.jam_keluar ? '100%' : '0%';
+      const keterlambatan = data.keterlambatan !== null ? formatKeterlambatan(data.keterlambatan) : '-';
+      const tanggalFormatted = today.format('DD MMMM YYYY');
+
+      return res.status(409).json({
+        message: data.jam_keluar
+          ? 'Sudah absen masuk dan keluar hari ini'
+          : 'Sudah absen masuk hari ini',
+        type: data.jam_keluar ? 'sudah_keluar' : 'sudah_masuk',
+        absen: {
+          ...data,
+          tanggal: tanggalFormatted,
+          keterlambatan,
+          status,
+          persen
+        }
+      });
     }
 
-    const keterlambatan = hitungKeterlambatan();
-    const status = 'Hadir'; // semua dianggap hadir meskipun terlambat
-
+    const keterlambatan = hitungKeterlambatan(today);
+    const status = 'Hadir';
 
     const sqlInsert = `
       INSERT INTO absensi (pegawai_id, tanggal, jam_masuk, lokasi_masuk, status, keterlambatan)
-      VALUES (?, CURDATE(), CURTIME(), ?, ?, ?)
+      VALUES (?, ?, CURTIME(), ?, ?, ?)
     `;
-    db.query(sqlInsert, [user.pegawai_id, lokasi, status, keterlambatan], (err2) => {
+    db.query(sqlInsert, [user.pegawai_id, tanggalHariIni, lokasi, status, keterlambatan], (err2) => {
       if (err2) return res.status(500).json({ message: 'Gagal absen masuk', error: err2 });
-
       res.json({ message: 'Absensi masuk berhasil', type: 'masuk' });
     });
   });
 };
 
+// ====================
+// FUNGSI BANTUAN
+// ====================
+function hitungKeterlambatan(now) {
+  const hari = now.day(); // 0 = Minggu, 6 = Sabtu
+  const jamKerja = getJamKerja(hari); // Ambil jam kerja dari dateUtils
+
+  const jamMasukWajib = moment(now.format('YYYY-MM-DD') + ' 08:00:00'); // Masuk wajib jam 08:00
+  const selisihMenit = now.diff(jamMasukWajib, 'minutes');
+
+  return selisihMenit > 0 ? selisihMenit : 0;
+}
+
+function formatKeterlambatan(menit) {
+  const jam = Math.floor(menit / 60);
+  const sisaMenit = menit % 60;
+  if (jam > 0 && sisaMenit > 0) return `${jam} jam ${sisaMenit} menit`;
+  if (jam > 0) return `${jam} jam`;
+  return `${sisaMenit} menit`;
+}
+
 // =====================
 // ABSEN KELUAR
 // =====================
+
 exports.absenKeluar = (req, res) => {
   let { latitude, longitude } = req.body;
   const user = req.user;
 
   latitude = parseFloat(latitude);
   longitude = parseFloat(longitude);
+
+  const distance = geolib.getDistance(
+    { latitude, longitude },
+    { latitude: kantorLat, longitude: kantorLng }
+  );
+
+  if (distance > radiusMeter) {
+    return res.status(403).json({ message: 'Diluar radius lokasi kantor', distance });
+  }
+
   const lokasi = `${latitude},${longitude}`;
+  const today = moment();
+  const hari = today.day(); // 0 = Minggu
+  const tanggalHariIni = today.format('YYYY-MM-DD');
 
-  const sqlCek = `SELECT * FROM absensi WHERE pegawai_id = ? AND tanggal = CURDATE()`;
+  if (hari === 0) {
+    return res.status(403).json({ message: 'Hari Minggu adalah hari libur' });
+  }
 
-  db.query(sqlCek, [user.pegawai_id], (err, result) => {
+  const sqlCek = `SELECT * FROM absensi WHERE pegawai_id = ? AND tanggal = ?`;
+
+  db.query(sqlCek, [user.pegawai_id, tanggalHariIni], (err, result) => {
     if (err) return res.status(500).json({ message: 'Error cek absensi', error: err });
 
     if (result.length === 0) {
       return res.status(404).json({ message: 'Belum absen masuk hari ini' });
     }
 
-    if (result[0].jam_keluar) {
+    const data = result[0];
+
+    if (data.jam_keluar) {
+      // Sudah absen keluar → kembalikan data yang diformat
+      const status = 'Hadir';
+      const persen = '100%';
+      const keterlambatan = data.keterlambatan !== null ? formatKeterlambatan(data.keterlambatan) : '-';
+      const tanggalFormatted = today.format('DD MMMM YYYY');
+
       return res.status(409).json({
         message: 'Sudah absen keluar hari ini',
         type: 'sudah_keluar',
-        absen: result[0]
+        absen: {
+          ...data,
+          tanggal: tanggalFormatted,
+          keterlambatan,
+          status,
+          persen
+        }
       });
     }
 
     const sqlUpdate = `
       UPDATE absensi 
       SET jam_keluar = CURTIME(), lokasi_keluar = ? 
-      WHERE pegawai_id = ? AND tanggal = CURDATE()
+      WHERE pegawai_id = ? AND tanggal = ?
     `;
-    db.query(sqlUpdate, [lokasi, user.pegawai_id], (err2) => {
+    db.query(sqlUpdate, [lokasi, user.pegawai_id, tanggalHariIni], (err2) => {
       if (err2) return res.status(500).json({ message: 'Gagal absen keluar', error: err2 });
 
-      res.json({ message: 'Absensi keluar berhasil', type: 'keluar' });
+      // Ambil kembali data terbaru setelah update
+      db.query(sqlCek, [user.pegawai_id, tanggalHariIni], (err3, result2) => {
+        if (err3) return res.status(500).json({ message: 'Gagal ambil ulang data', error: err3 });
+
+        const updated = result2[0];
+        const status = 'Hadir';
+        const persen = '100%';
+        const keterlambatan = updated.keterlambatan !== null ? formatKeterlambatan(updated.keterlambatan) : '-';
+        const tanggalFormatted = today.format('DD MMMM YYYY');
+
+        res.json({
+          message: 'Absensi keluar berhasil',
+          type: 'keluar',
+          absen: {
+            ...updated,
+            tanggal: tanggalFormatted,
+            keterlambatan,
+            status,
+            persen
+          }
+        });
+      });
     });
   });
 };
 
+// ====================
+// FUNGSI BANTUAN
+// ====================
+function formatKeterlambatan(menit) {
+  const jam = Math.floor(menit / 60);
+  const sisaMenit = menit % 60;
+  if (jam > 0 && sisaMenit > 0) return `${jam} jam ${sisaMenit} menit`;
+  if (jam > 0) return `${jam} jam`;
+  return `${sisaMenit} menit`;
+}
+
 // =====================
-// RIWAYAT PEGAWAI LOGIN
+// RIWAYAT
 // =====================
-exports.getRiwayat = (req, res) => {
+
+exports.getRiwayatLengkap = (req, res) => {
   const pegawai_id = req.user.pegawai_id;
-  if (!pegawai_id) {
-    return res.status(400).json({ message: 'pegawai_id tidak ditemukan di token' });
+  const bulan = req.query.bulan ? parseInt(req.query.bulan) : moment().month();
+  const tahun = req.query.tahun ? parseInt(req.query.tahun) : moment().year();
+
+  const sqlAktif = `SELECT tanggal_aktif FROM pegawai WHERE id = ?`;
+
+  db.query(sqlAktif, [pegawai_id], (errAktif, aktifData) => {
+    if (errAktif) return res.status(500).json({ message: 'Gagal ambil data pegawai', error: errAktif });
+
+    const tanggalAktif = moment(aktifData[0].tanggal_aktif).startOf('day');
+    const semuaTanggal = generateTanggalKerja(bulan, tahun);
+    const allDates = semuaTanggal.filter(tgl => moment(tgl).isSameOrAfter(tanggalAktif));
+
+    const sqlAbsensi = `SELECT * FROM absensi WHERE pegawai_id = ? AND MONTH(tanggal) = ? AND YEAR(tanggal) = ?`;
+    const sqlIzin = `SELECT tanggal_mulai, tanggal_selesai FROM izin WHERE pegawai_id = ? AND status = 'Disetujui'`;
+
+    db.query(sqlAbsensi, [pegawai_id, bulan + 1, tahun], (err, absensiData) => {
+      if (err) return res.status(500).json({ message: 'Gagal ambil absensi', error: err });
+
+      db.query(sqlIzin, [pegawai_id], (err2, izinData) => {
+        if (err2) return res.status(500).json({ message: 'Gagal ambil izin', error: err2 });
+
+        const riwayatMap = {};
+        const tanggalIzin = new Set();
+
+        izinData.forEach(row => {
+          const mulai = moment(row.tanggal_mulai);
+          const selesai = moment(row.tanggal_selesai);
+          while (mulai.isSameOrBefore(selesai)) {
+            tanggalIzin.add(mulai.format('YYYY-MM-DD'));
+            mulai.add(1, 'day');
+          }
+        });
+
+        absensiData.forEach(row => {
+          const tgl = moment(row.tanggal).format('YYYY-MM-DD');
+          riwayatMap[tgl] = row;
+        });
+
+        const now = moment();
+
+const hasil = allDates.map(tgl => {
+  const date = moment(tgl);
+  const hari = date.day(); // 0=minggu, 1=senin, ..., 6=sabtu
+  const jamKerja = getJamKerja(hari);
+  const jamPulangWajib = moment(tgl + ' 08:00:00').add(jamKerja, 'hours');
+  const now = moment();
+
+  const tanggalFormatted = date.format('DD MMMM YYYY');
+  const jamWajibFormatted = `${jamKerja} jam`;
+
+  if (riwayatMap[tgl]) {
+    const row = riwayatMap[tgl];
+    let status = 'Alpha';
+    let persen = 0;
+
+    if (row.jam_masuk && row.jam_keluar) {
+      status = 'Hadir';
+      persen = 100;
+    } else if (row.jam_masuk && !row.jam_keluar) {
+      status = now.isAfter(jamPulangWajib) ? 'Hadir' : 'Belum Pulang';
+      persen = now.isAfter(jamPulangWajib) ? 0 : 50;
+    }
+
+    return {
+      tanggal: tanggalFormatted,
+      jam_wajib: jamWajibFormatted,
+      jam_masuk: row.jam_masuk,
+      jam_keluar: row.jam_keluar,
+      keterlambatan: row.keterlambatan || 0,
+      status,
+      persen
+    };
   }
 
-  const sql = `SELECT * FROM absensi WHERE pegawai_id = ? ORDER BY tanggal DESC`;
-  db.query(sql, [pegawai_id], (err, results) => {
-    if (err) return res.status(500).json({ message: 'Gagal mengambil riwayat', error: err });
-    res.json(results);
+  if (tanggalIzin.has(tgl)) {
+    return {
+      tanggal: tanggalFormatted,
+      jam_wajib: jamWajibFormatted,
+      jam_masuk: null,
+      jam_keluar: null,
+      keterlambatan: 0,
+      status: 'Izin',
+      persen: 50
+    };
+  }
+
+  return {
+    tanggal: tanggalFormatted,
+    jam_wajib: jamWajibFormatted,
+    jam_masuk: null,
+    jam_keluar: null,
+    keterlambatan: 0,
+    status: 'Alpha',
+    persen: 0
+  };
+});
+
+
+        res.json(hasil.reverse());
+      });
+    });
   });
 };
 
+
+
+
 // =====================
-// REKAP SEMUA ABSEN
+// STATISTIK PEGAWAI
+// =====================
+exports.getStatistikPegawai = (req, res) => {
+  const pegawai_id = req.user.pegawai_id;
+  const bulan = req.query.bulan ? parseInt(req.query.bulan) : moment().month();
+  const tahun = req.query.tahun ? parseInt(req.query.tahun) : moment().year();
+
+  const tanggalKerja = generateTanggalKerja(bulan, tahun);
+
+  const sqlAbsensi = `
+    SELECT * FROM absensi 
+    WHERE pegawai_id = ? AND MONTH(tanggal) = ? AND YEAR(tanggal) = ?
+  `;
+  const sqlIzin = `
+    SELECT tanggal_mulai, tanggal_selesai FROM izin 
+    WHERE pegawai_id = ? AND status = 'Disetujui'
+  `;
+
+  db.query(sqlAbsensi, [pegawai_id, bulan + 1, tahun], (err, absensiData) => {
+    if (err) return res.status(500).json({ message: 'Gagal ambil absensi', error: err });
+
+    db.query(sqlIzin, [pegawai_id], (err2, izinData) => {
+      if (err2) return res.status(500).json({ message: 'Gagal ambil izin', error: err2 });
+
+      const riwayatMap = {};
+      const izinSet = new Set();
+
+      // Isi izin tanggal satu per satu ke dalam Set
+      izinData.forEach(row => {
+        const mulai = moment(row.tanggal_mulai);
+        const selesai = moment(row.tanggal_selesai);
+        while (mulai.isSameOrBefore(selesai)) {
+          izinSet.add(mulai.format('YYYY-MM-DD'));
+          mulai.add(1, 'day');
+        }
+      });
+
+      // Isi data absensi ke Map berdasarkan tanggal
+      absensiData.forEach(row => {
+        const tgl = moment(row.tanggal).format('YYYY-MM-DD');
+        riwayatMap[tgl] = row;
+      });
+
+      // Hitung statistik
+      let hadir = 0;
+      let alpha = 0;
+      let izin = 0;
+      let totalKeterlambatan = 0;
+      let totalPersen = 0;
+
+      tanggalKerja.forEach(tgl => {
+        const date = moment(tgl);
+        const hari = date.day(); // 0 = Minggu, 6 = Sabtu
+        const jamKerja = getJamKerja(hari);
+        const jamPulangWajib = moment(tgl + ' 08:00:00').add(jamKerja, 'hours');
+        const now = moment();
+
+        let persen = 0;
+
+        if (riwayatMap[tgl]) {
+          const row = riwayatMap[tgl];
+          totalKeterlambatan += parseInt(row.keterlambatan || 0);
+
+          if (row.jam_masuk && row.jam_keluar) {
+            persen = 100;
+            hadir++;
+          } else if (row.jam_masuk && !row.jam_keluar) {
+            if (now.isAfter(jamPulangWajib)) {
+              persen = 0;
+              hadir++;
+            } else {
+              persen = 50;
+            }
+          } else {
+            alpha++;
+          }
+        } else if (izinSet.has(tgl)) {
+          persen = 50;
+          izin++;
+        } else {
+          alpha++;
+        }
+
+        totalPersen += persen;
+      });
+
+      const jumlahHari = tanggalKerja.length;
+      const rataRataPersen = jumlahHari > 0 ? Math.round(totalPersen / jumlahHari) : 0;
+
+      res.json({
+        hadir,
+        alpha,
+        izin,
+        keterlambatan: totalKeterlambatan,
+        keterlambatan_formatted: formatKeterlambatan(totalKeterlambatan),
+        persen: rataRataPersen
+      });
+    });
+  });
+};
+
+
+
+// =====================
+// REKAP (Admin)
 // =====================
 exports.getRekap = (req, res) => {
   const sql = `
-    SELECT a.*, p.nama, p.nip
-    FROM absensi a
-    JOIN pegawai p ON a.pegawai_id = p.id
+    SELECT a.*, p.nama, p.nip 
+    FROM absensi a 
+    JOIN pegawai p ON a.pegawai_id = p.id 
     ORDER BY a.tanggal DESC
   `;
-  db.query(sql, (err, result) => {
+  db.query(sql, (err, results) => {
     if (err) return res.status(500).json({ message: 'Gagal mengambil rekap', error: err });
-    res.json(result);
+
+    const formatted = results.map(item => {
+      const keterlambatan = item.keterlambatan !== null ? formatKeterlambatan(item.keterlambatan) : '-';
+      const tanggalFormatted = new Date(item.tanggal).toLocaleDateString('id-ID', {
+        day: '2-digit',
+        month: 'long',
+        year: 'numeric'
+      });
+      return {
+        ...item,
+        tanggal: tanggalFormatted,
+        keterlambatan
+      };
+    });
+
+    res.json(formatted);
   });
 };
 
 // =====================
-// DASHBOARD STATISTIK ADMIN
-// =====================
-exports.getDashboardStatistik = (req, res) => {
-  const sql = `
-    SELECT 
-      COUNT(*) as total_hadir,
-      SUM(CASE WHEN status = 'Terlambat' THEN 1 ELSE 0 END) as terlambat,
-      SUM(CASE WHEN status = 'Tidak Hadir' THEN 1 ELSE 0 END) as alpha
-    FROM absensi
-    WHERE MONTH(tanggal) = MONTH(CURRENT_DATE())
-      AND YEAR(tanggal) = YEAR(CURRENT_DATE())
-  `;
-
-  db.query(sql, (err, result) => {
-    if (err) return res.status(500).json({ message: 'DB error', error: err });
-
-    const stat = {
-      hadir: result[0].total_hadir,
-      terlambat: result[0].terlambat,
-      alpha: result[0].alpha,
-    };
-
-    res.json(stat);
-  });
-};
-
-// =====================
-// CHART GRAFIK HARIAN
+// CHART KEHADIRAN
 // =====================
 exports.getChartKehadiran = (req, res) => {
   const sql = `
     SELECT 
       tanggal,
-      COUNT(*) AS jumlah_hadir,
-      ROUND(SUM(CASE 
-          WHEN status = 'Hadir' OR status = 'Terlambat' THEN 1
-          ELSE 0 END) * 100 / COUNT(*), 2
-      ) AS persentase
+      COUNT(*) AS total_absen,
+      SUM(CASE WHEN jam_masuk IS NOT NULL AND jam_keluar IS NOT NULL THEN 1 ELSE 0 END) AS hadir_lengkap
     FROM absensi
     WHERE MONTH(tanggal) = MONTH(CURRENT_DATE())
       AND YEAR(tanggal) = YEAR(CURRENT_DATE())
@@ -185,57 +470,147 @@ exports.getChartKehadiran = (req, res) => {
     ORDER BY tanggal ASC
   `;
 
-  db.query(sql, (err, result) => {
-    if (err) return res.status(500).json({ message: 'Gagal ambil data grafik', error: err });
+  db.query(sql, (err, results) => {
+    if (err) return res.status(500).json({ message: 'Gagal ambil data chart', error: err });
 
-    const chartData = result.map((row) => ({
-      tanggal: row.tanggal,
-      jumlah: row.jumlah_hadir,
-      persentase: row.persentase,
-    }));
+    const formatted = results.map(row => {
+      const persentase = row.total_absen > 0
+        ? Math.round((row.hadir_lengkap / row.total_absen) * 100)
+        : 0;
 
-    res.json(chartData);
+      return {
+        tanggal: new Date(row.tanggal).toLocaleDateString('id-ID', {
+          day: '2-digit',
+          month: 'short',
+          year: 'numeric'
+        }),
+        jumlah: row.hadir_lengkap,
+        persentase
+      };
+    });
+
+    res.json(formatted);
   });
 };
 
-// =====================
-// STATISTIK PEGAWAI LOGIN
-// =====================
-exports.getStatistikPegawai = (req, res) => {
-  const pegawai_id = req.user.pegawai_id;
-  if (!pegawai_id) return res.status(400).json({ message: 'pegawai_id tidak ditemukan' });
 
+// =====================
+// DASHBOARD ADMIN
+// =====================
+exports.getDashboardStatistik = (req, res) => {
   const sql = `
     SELECT 
-      SUM(CASE WHEN status = 'Hadir' THEN 1 ELSE 0 END) AS hadir,
-      SUM(CASE WHEN status = 'Tidak Hadir' THEN 1 ELSE 0 END) AS alpha,
-      SUM(CAST(keterlambatan AS UNSIGNED)) AS keterlambatan
+      COUNT(*) as total_absen,
+      SUM(CASE WHEN keterlambatan > 0 THEN 1 ELSE 0 END) as terlambat,
+      SUM(CASE WHEN is_alpha = 1 THEN 1 ELSE 0 END) as alpha
     FROM absensi
-    WHERE pegawai_id = ?
-      AND MONTH(tanggal) = MONTH(CURDATE())
-      AND YEAR(tanggal) = YEAR(CURDATE())
+    WHERE MONTH(tanggal) = MONTH(CURRENT_DATE())
+      AND YEAR(tanggal) = YEAR(CURRENT_DATE())
   `;
 
-  db.query(sql, [pegawai_id], (err, results) => {
-    if (err) return res.status(500).json({ message: 'Gagal mengambil statistik', error: err });
+  db.query(sql, (err, result) => {
+    if (err) return res.status(500).json({ message: 'Gagal ambil statistik dashboard', error: err });
 
-    const { hadir = 0, alpha = 0, keterlambatan = 0 } = results[0] || {};
-    const total = hadir + alpha;
-    const persen = total ? Math.round((hadir / total) * 100) : 0;
-
-    res.json({ hadir, alpha, keterlambatan, persen });
+    const data = result[0];
+    res.json({
+      hadir: data.total_absen,
+      terlambat: data.terlambat,
+      alpha: data.alpha
+    });
   });
 };
 
+
 // =====================
-// Hitung keterlambatan
+// FUNCTION BANTUAN
 // =====================
 function hitungKeterlambatan() {
   const now = new Date();
   const jamMasuk = new Date(now);
-  jamMasuk.setHours(8, 0, 0, 0); // Masuk jam 8
-
+  jamMasuk.setHours(8, 0, 0, 0);
   const selisihMs = now - jamMasuk;
   const selisihMenit = Math.floor(selisihMs / 60000);
   return selisihMenit > 0 ? selisihMenit : 0;
 }
+
+function formatKeterlambatan(menit) {
+  const jam = Math.floor(menit / 60);
+  const sisaMenit = menit % 60;
+  if (jam > 0 && sisaMenit > 0) return `${jam} jam ${sisaMenit} menit`;
+  if (jam > 0) return `${jam} jam`;
+  return `${sisaMenit} menit`;
+}
+
+function formatRiwayat(item) {
+  const keterlambatan = item.keterlambatan !== null ? formatKeterlambatan(item.keterlambatan) : '-';
+  const persen = (item.jam_masuk && item.jam_keluar) ? '100%' : '-';
+  const status = !item.jam_keluar ? 'Belum Pulang' : 'Selesai';
+  const tanggalFormatted = new Date(item.tanggal).toLocaleDateString('id-ID', {
+    day: '2-digit',
+    month: 'long',
+    year: 'numeric'
+  });
+
+  return {
+    ...item,
+    tanggal: tanggalFormatted,
+    keterlambatan,
+    persen,
+    status
+  };
+}
+
+
+
+// Tambahkan logika auto-mark alpha harian (bisa dipanggil lewat cronjob harian)
+exports.tandaiAlphaHarian = (req, res) => {
+  const hariIni = moment().format('YYYY-MM-DD');
+  const hari = moment().day(); // 0 = Minggu
+
+  if (hari === 0) {
+    return res.json({ message: 'Hari Minggu, tidak ada penandaan Alpha' });
+  }
+
+  const sqlPegawai = `SELECT id FROM pegawai`;
+  db.query(sqlPegawai, (err, pegawaiList) => {
+    if (err) return res.status(500).json({ message: 'Gagal ambil pegawai', error: err });
+
+    let selesai = 0;
+
+    pegawaiList.forEach((pegawai) => {
+      const sqlAbsen = `SELECT id FROM absensi WHERE pegawai_id = ? AND tanggal = ?`;
+      db.query(sqlAbsen, [pegawai.id, hariIni], (err2, resultAbsen) => {
+        if (err2) return;
+
+        if (resultAbsen.length === 0) {
+          const sqlIzin = `
+            SELECT id FROM izin 
+            WHERE pegawai_id = ? AND status = 'Disetujui' 
+            AND ? BETWEEN tanggal_mulai AND tanggal_selesai
+          `;
+          db.query(sqlIzin, [pegawai.id, hariIni], (err3, resultIzin) => {
+            if (err3) return;
+
+            if (resultIzin.length === 0) {
+              const sqlAlpha = `
+                INSERT INTO absensi (pegawai_id, tanggal, status, is_alpha)
+                VALUES (?, ?, 'Tidak Hadir', 1)
+              `;
+              db.query(sqlAlpha, [pegawai.id, hariIni], () => {});
+            }
+
+            selesai++;
+            if (selesai === pegawaiList.length) {
+              res.json({ message: 'Penandaan Alpha selesai untuk semua pegawai' });
+            }
+          });
+        } else {
+          selesai++;
+          if (selesai === pegawaiList.length) {
+            res.json({ message: 'Penandaan Alpha selesai untuk semua pegawai' });
+          }
+        }
+      });
+    });
+  });
+};

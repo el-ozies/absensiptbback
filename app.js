@@ -4,8 +4,8 @@ const cors = require('cors');
 const dotenv = require('dotenv');
 const authRoutes = require('./routes/authRoutes');
 const absensiRoutes = require('./routes/absensiRoutes');
+const izinRoutes = require('./routes/izinRoutes')
 const morgan = require('morgan');
-const izinRoutes = require('./routes/izinRoutes');
 
 dotenv.config();
 const app = express();
@@ -18,7 +18,8 @@ app.use(morgan('dev'));
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/absensi', absensiRoutes);
-app.use('/api/izin', izinRoutes);
+app.use('/api/izin', izinRoutes); // ✅ otomatis /api/izin POST dan GET
+
 
 // Root Route
 app.get('/', (req, res) => {
