@@ -40,8 +40,6 @@ exports.login = (req, res) => {
 };
 
 // REGISTER
-// ✅ REGISTER dengan insert ke pegawai
-// REGISTER
 exports.register = async (req, res) => {
   const { username, password, role, nama, nip, jabatan, no_telp, alamat } = req.body;
 
@@ -55,16 +53,16 @@ exports.register = async (req, res) => {
     // Cek jika username sudah dipakai
     const sqlCheck = `SELECT * FROM users WHERE username = ?`;
     db.query(sqlCheck, [username], (err, results) => {
-      if (err) return res.status(500).json({ message: 'DB error' });
+      if (err) return res.status(500).json({ message: 'DB error', error: err });
       if (results.length > 0) {
         return res.status(409).json({ message: 'Username sudah digunakan' });
       }
 
-      // ✅ INSERT PEGAWAI JIKA role == pegawai
+      // INSERT PEGAWAI JIKA role == pegawai
       if (role === 'pegawai') {
         const sqlPegawai = `
-          INSERT INTO pegawai (nama, nip, jabatan, no_telp, alamat)
-          VALUES (?, ?, ?, ?, ?)
+          INSERT INTO pegawai (nama, nip, jabatan, no_telp, alamat, tanggal_aktif)
+          VALUES (?, ?, ?, ?, ?, CURDATE())
         `;
         db.query(sqlPegawai, [nama, nip || null, jabatan || null, no_telp || null, alamat || null], (err2, result2) => {
           if (err2) return res.status(500).json({ message: 'Gagal tambah pegawai', error: err2 });
@@ -78,7 +76,7 @@ exports.register = async (req, res) => {
           });
         });
       } else {
-        // ✅ Admin tidak punya pegawai_id
+        // Admin tidak punya pegawai_id
         const sqlUser = `INSERT INTO users (username, password, role) VALUES (?, ?, ?)`;
         db.query(sqlUser, [username, hashedPassword, role], (err4) => {
           if (err4) return res.status(500).json({ message: 'Gagal buat user', error: err4 });
@@ -90,10 +88,6 @@ exports.register = async (req, res) => {
     res.status(500).json({ message: 'Gagal hash password', error: err });
   }
 };
-
-
-
-
 
 // GET /api/pegawai
 exports.getPegawai = (req, res) => {
