@@ -12,6 +12,7 @@ router.get('/riwayat', verifyToken, absensiController.getRiwayatLengkap);
 router.get('/statistik', verifyToken, absensiController.getStatistikPegawai);
 router.get('/chart', verifyToken, absensiController.getChartKehadiran);
 router.get('/dashboard', verifyToken, absensiController.getDashboardStatistik);
+router.get('/dashboard', verifyToken, absensiController.getDashboardStatistik);
 
 // Rekap Admin
 router.get('/rekap', verifyToken, absensiController.getRekap);

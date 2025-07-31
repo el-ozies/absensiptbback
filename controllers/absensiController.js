@@ -9,7 +9,7 @@ const moment = require('moment');
 // Lokasi kantor PTB Manyar
 const kantorLat = -7.120436;
 const kantorLng = 112.600460;
-const radiusMeter = 20000;
+const radiusMeter = 100000;
 
 // =====================
 // ABSEN MASUK
@@ -218,9 +218,13 @@ exports.getRiwayatLengkap = (req, res) => {
   const sqlAktif = `SELECT tanggal_aktif FROM pegawai WHERE id = ?`;
 
   db.query(sqlAktif, [pegawai_id], (errAktif, aktifData) => {
-    if (errAktif) return res.status(500).json({ message: 'Gagal ambil data pegawai', error: errAktif });
+  if (errAktif) return res.status(500).json({ message: 'Gagal ambil data pegawai', error: errAktif });
 
-    const tanggalAktif = moment(aktifData[0].tanggal_aktif).startOf('day');
+  if (!aktifData || aktifData.length === 0) {
+    return res.status(404).json({ message: 'Data pegawai tidak ditemukan' });
+  }
+
+  const tanggalAktif = moment(aktifData[0].tanggal_aktif).startOf('day');
     const semuaTanggal = generateTanggalKerja(bulan, tahun);
     const allDates = semuaTanggal.filter(tgl => moment(tgl).isSameOrAfter(tanggalAktif));
 
@@ -427,50 +431,114 @@ exports.getStatistikPegawai = (req, res) => {
 // REKAP (Admin)
 // =====================
 exports.getRekap = (req, res) => {
-  const sql = `
-    SELECT a.*, p.nama, p.nip 
-    FROM absensi a 
-    JOIN pegawai p ON a.pegawai_id = p.id 
-    ORDER BY a.tanggal DESC
-  `;
-  db.query(sql, (err, results) => {
-    if (err) return res.status(500).json({ message: 'Gagal mengambil rekap', error: err });
+  const { tanggal } = req.query;
+  if (!tanggal) return res.status(400).json({ message: 'Tanggal wajib diisi' });
 
-    const formatted = results.map(item => {
-      const keterlambatan = item.keterlambatan !== null ? formatKeterlambatan(item.keterlambatan) : '-';
-      const tanggalFormatted = new Date(item.tanggal).toLocaleDateString('id-ID', {
-        day: '2-digit',
-        month: 'long',
-        year: 'numeric'
+  const sqlPegawai = 'SELECT id, nama, nip, tanggal_aktif FROM pegawai';
+  db.query(sqlPegawai, (errPegawai, pegawaiRows) => {
+    if (errPegawai) return res.status(500).json({ message: 'Gagal mengambil data pegawai', error: errPegawai });
+
+    const aktifTanggal = moment(tanggal);
+
+    // Filter pegawai yang belum aktif pada tanggal tersebut
+    const pegawaiAktif = pegawaiRows.filter(p =>
+      !p.tanggal_aktif || moment(p.tanggal_aktif).isSameOrBefore(aktifTanggal, 'day')
+    );
+
+    const sqlAbsensi = `SELECT * FROM absensi WHERE tanggal = ?`;
+    db.query(sqlAbsensi, [tanggal], (errAbsen, absensiRows) => {
+      if (errAbsen) return res.status(500).json({ message: 'Gagal mengambil data absensi', error: errAbsen });
+
+      const sqlIzin = `
+        SELECT * FROM izin 
+        WHERE status = 'Disetujui' 
+          AND tanggal_mulai <= ? 
+          AND tanggal_selesai >= ?
+      `;
+      db.query(sqlIzin, [tanggal, tanggal], (errIzin, izinRows) => {
+        if (errIzin) return res.status(500).json({ message: 'Gagal mengambil data izin', error: errIzin });
+
+        const dataRekap = [];
+        const izinMap = new Map();
+        izinRows.forEach(i => izinMap.set(i.pegawai_id, true));
+
+        const absenMap = new Map();
+        absensiRows.forEach(row => absenMap.set(row.pegawai_id, row));
+
+        const today = moment(tanggal);
+        const hari = today.day();
+        const jamKerja = getJamKerja(hari);
+        const jamPulangWajib = moment(`${tanggal} 08:00:00`).add(jamKerja, 'hours');
+
+        pegawaiAktif.forEach(pegawai => {
+          const row = absenMap.get(pegawai.id);
+          const isIzin = izinMap.has(pegawai.id);
+
+          let status = 'Alpha';
+          let jam_masuk = '-';
+          let jam_keluar = '-';
+          let kehadiran = '0%';
+
+          if (row) {
+            jam_masuk = row.jam_masuk || '-';
+            jam_keluar = row.jam_keluar || '-';
+
+            if (row.jam_masuk && row.jam_keluar) {
+              status = 'Hadir';
+              kehadiran = '100%';
+            } else if (row.jam_masuk && !row.jam_keluar) {
+              status = 'Hadir';
+              kehadiran = '0%';
+            }
+          } else if (isIzin) {
+            status = 'Izin';
+            kehadiran = '50%';
+          }
+
+          dataRekap.push({
+            tanggal: today.format('DD MMMM YYYY'),
+            nama: pegawai.nama,
+            nip: pegawai.nip,
+            jam_masuk,
+            jam_keluar,
+            status,
+            kehadiran
+          });
+        });
+
+        res.json(dataRekap);
       });
-      return {
-        ...item,
-        tanggal: tanggalFormatted,
-        keterlambatan
-      };
     });
-
-    res.json(formatted);
   });
 };
+
+
+
+
 
 // =====================
 // CHART KEHADIRAN
 // =====================
 exports.getChartKehadiran = (req, res) => {
+  const bulan = parseInt(req.query.bulan);
+  const tahun = parseInt(req.query.tahun);
+
+  if (!bulan || !tahun) {
+    return res.status(400).json({ message: 'Parameter bulan dan tahun wajib diisi' });
+  }
+
   const sql = `
     SELECT 
       tanggal,
       COUNT(*) AS total_absen,
       SUM(CASE WHEN jam_masuk IS NOT NULL AND jam_keluar IS NOT NULL THEN 1 ELSE 0 END) AS hadir_lengkap
     FROM absensi
-    WHERE MONTH(tanggal) = MONTH(CURRENT_DATE())
-      AND YEAR(tanggal) = YEAR(CURRENT_DATE())
+    WHERE MONTH(tanggal) = ? AND YEAR(tanggal) = ?
     GROUP BY tanggal
     ORDER BY tanggal ASC
   `;
 
-  db.query(sql, (err, results) => {
+  db.query(sql, [bulan, tahun], (err, results) => {
     if (err) return res.status(500).json({ message: 'Gagal ambil data chart', error: err });
 
     const formatted = results.map(row => {
@@ -497,25 +565,54 @@ exports.getChartKehadiran = (req, res) => {
 // =====================
 // DASHBOARD ADMIN
 // =====================
+// controllers/absensiController.js
 exports.getDashboardStatistik = (req, res) => {
-  const sql = `
-    SELECT 
-      COUNT(*) as total_absen,
-      SUM(CASE WHEN keterlambatan > 0 THEN 1 ELSE 0 END) as terlambat,
-      SUM(CASE WHEN is_alpha = 1 THEN 1 ELSE 0 END) as alpha
-    FROM absensi
-    WHERE MONTH(tanggal) = MONTH(CURRENT_DATE())
-      AND YEAR(tanggal) = YEAR(CURRENT_DATE())
+  const bulan = moment().month() + 1;
+  const tahun = moment().year();
+
+  const sqlHadir = `
+    SELECT COUNT(*) AS total FROM absensi 
+    WHERE MONTH(tanggal) = ? AND YEAR(tanggal) = ?
+    AND jam_masuk IS NOT NULL AND jam_keluar IS NOT NULL
   `;
 
-  db.query(sql, (err, result) => {
-    if (err) return res.status(500).json({ message: 'Gagal ambil statistik dashboard', error: err });
+  const sqlTerlambat = `
+    SELECT COUNT(*) AS total FROM absensi 
+    WHERE MONTH(tanggal) = ? AND YEAR(tanggal) = ?
+    AND keterlambatan > 0
+  `;
 
-    const data = result[0];
-    res.json({
-      hadir: data.total_absen,
-      terlambat: data.terlambat,
-      alpha: data.alpha
+  const sqlIzinMenunggu = `
+    SELECT COUNT(*) AS total FROM izin 
+    WHERE status = 'Menunggu Validasi'
+  `;
+
+  const sqlPegawai = `SELECT COUNT(*) AS total FROM pegawai`;
+
+  const tanggalKerja = generateTanggalKerja(bulan - 1, tahun);
+  const hariKerjaBulanIni = tanggalKerja.length;
+
+  db.query(sqlHadir, [bulan, tahun], (err, dataHadir) => {
+    if (err) return res.status(500).json({ message: 'Gagal ambil data hadir', err });
+
+    db.query(sqlTerlambat, [bulan, tahun], (err2, dataTerlambat) => {
+      if (err2) return res.status(500).json({ message: 'Gagal ambil data terlambat', err2 });
+
+      db.query(sqlIzinMenunggu, (err3, dataIzin) => {
+        if (err3) return res.status(500).json({ message: 'Gagal ambil data izin', err3 });
+
+        db.query(sqlPegawai, (err4, dataPegawai) => {
+          if (err4) return res.status(500).json({ message: 'Gagal ambil data pegawai', err4 });
+
+          return res.json({
+            hadir: dataHadir[0].total,
+            terlambat: dataTerlambat[0].total,
+            izin_menunggu: dataIzin[0].total,
+            total_pegawai: dataPegawai[0].total,
+            hari_kerja: hariKerjaBulanIni,
+          });
+        });
+      });
     });
   });
 };

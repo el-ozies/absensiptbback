@@ -12,8 +12,14 @@ exports.login = (req, res) => {
     if (results.length === 0) return res.status(401).json({ message: 'Username tidak ditemukan' });
 
     const user = results[0];
-    const match = await bcrypt.compare(password, user.password);
-    if (!match) return res.status(401).json({ message: 'Password salah' });
+
+    try {
+      const match = await bcrypt.compare(password, user.password);
+      if (!match) return res.status(401).json({ message: 'Password salah' });
+    } catch (errCompare) {
+      console.error('Error compare password:', errCompare);
+      return res.status(500).json({ message: 'Gagal membandingkan password', error: errCompare });
+    }
 
     const token = jwt.sign(
       {

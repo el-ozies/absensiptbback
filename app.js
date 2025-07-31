@@ -5,6 +5,7 @@ const dotenv = require('dotenv');
 const authRoutes = require('./routes/authRoutes');
 const absensiRoutes = require('./routes/absensiRoutes');
 const izinRoutes = require('./routes/izinRoutes')
+const userRoutes = require('./routes/userRoutes');
 const morgan = require('morgan');
 
 dotenv.config();
@@ -19,6 +20,7 @@ app.use(morgan('dev'));
 app.use('/api/auth', authRoutes);
 app.use('/api/absensi', absensiRoutes);
 app.use('/api/izin', izinRoutes); // ✅ otomatis /api/izin POST dan GET
+app.use('/api/users', userRoutes);
 
 
 // Root Route
