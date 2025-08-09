@@ -1,52 +1,70 @@
-const moment = require('moment');
+// utils/dateUtils.js
+const dayjs = require("dayjs");
+const isSameOrAfter = require("dayjs/plugin/isSameOrAfter");
+const advancedFormat = require("dayjs/plugin/advancedFormat");
+dayjs.extend(isSameOrAfter);
+dayjs.extend(advancedFormat);
 
 /**
- * Menghasilkan array tanggal kerja (tidak termasuk hari Minggu) dalam bulan & tahun tertentu.
- * Menyembunyikan tanggal hari ini jika belum jam 18:00.
- * @param {number} bulan - Index bulan (0 = Januari, 11 = Desember)
- * @param {number} tahun - Tahun (e.g., 2025)
- * @returns {string[]} - Array tanggal dalam format 'YYYY-MM-DD'
+ * Menghasilkan array tanggal kerja (Senin–Sabtu) dalam bulan & tahun tertentu.
+ * Bulan 1-based (1=Jan, 12=Des).
  */
 function generateTanggalKerja(bulan, tahun) {
   const tanggalKerja = [];
-  const daysInMonth = moment({ year: tahun, month: bulan }).daysInMonth();
+  const daysInMonth = dayjs(`${tahun}-${String(bulan).padStart(2, "0")}-01`).daysInMonth();
+  const now = dayjs();
 
-  const now = moment();
-  const today = now.format('YYYY-MM-DD');
-  const isAfter18 = now.hour() >= 18;
-
-  for (let tanggal = 1; tanggal <= daysInMonth; tanggal++) {
-    const current = moment({ year: tahun, month: bulan, day: tanggal });
-    const formatted = current.format('YYYY-MM-DD');
-
-    // Lewati hari Minggu
-    if (current.day() === 0) continue;
-
-    // Lewati hari ini jika belum jam 18.00
-    if (formatted === today && !isAfter18) continue;
-
-    // Hanya tampilkan hari sampai hari ini
-    if (current.isAfter(now, 'day')) continue;
-
-    tanggalKerja.push(formatted);
+  for (let t = 1; t <= daysInMonth; t++) {
+    const current = dayjs(`${tahun}-${String(bulan).padStart(2, "0")}-${String(t).padStart(2, "0")}`, "YYYY-MM-DD");
+    const dayIndex = current.day(); // 0 = Minggu
+    if (dayIndex === 0) continue; // skip Minggu
+    if (current.isAfter(now, "day")) break; // stop jika sudah melewati hari ini
+    tanggalKerja.push(current.format("YYYY-MM-DD"));
   }
 
   return tanggalKerja;
 }
 
 /**
- * Mengembalikan durasi jam kerja berdasarkan hari
- * @param {number} dayIndex - indeks hari: 0=minggu, 1=senin, ..., 6=sabtu
- * @returns {number} - jumlah jam kerja
+ * Detail jam kerja sesuai hari (jam_masuk, jam_pulang, istirahat dalam menit, jam_kerja string)
  */
-function getJamKerja(dayIndex) {
-  if (dayIndex === 6) return 5; // Sabtu
-  if (dayIndex === 5) return 6; // Jumat
-  if (dayIndex === 0) return 0; // Minggu
-  return 7; // Senin–Kamis
+function getJamKerjaDetail(dayIndex) {
+  if (dayIndex === 0) return { jam_masuk: null, jam_pulang: null, istirahat: 0, jam_kerja: "-" };
+  if (dayIndex === 5) return { jam_masuk: "08:00:00", jam_pulang: "16:00:00", istirahat: 120, jam_kerja: "08:00 - 16:00" }; // Jumat
+  if (dayIndex === 6) return { jam_masuk: "08:00:00", jam_pulang: "14:00:00", istirahat: 60, jam_kerja: "08:00 - 14:00" }; // Sabtu
+  return { jam_masuk: "08:00:00", jam_pulang: "16:00:00", istirahat: 60, jam_kerja: "08:00 - 16:00" }; // Senin-Kamis
+}
+
+/**
+ * Hitung jam kerja aktual (return "X jam Y menit")
+ */
+function hitungJamKerja(jamMasuk, jamKeluar, istirahatMenit = 60) {
+  if (!jamMasuk || !jamKeluar) return "-";
+  const masuk = dayjs(jamMasuk, "HH:mm:ss");
+  const keluar = dayjs(jamKeluar, "HH:mm:ss");
+  const totalMenit = keluar.diff(masuk, "minute") - istirahatMenit;
+  if (totalMenit <= 0) return "-";
+  const jam = Math.floor(totalMenit / 60);
+  const menit = totalMenit % 60;
+  return `${jam} jam ${menit} menit`;
+}
+
+/**
+ * Hitung keterlambatan
+ */
+function hitungKeterlambatan(jamMasuk, jamWajibMasuk) {
+  if (!jamMasuk || !jamWajibMasuk) return "-";
+  const masuk = dayjs(jamMasuk, "HH:mm:ss");
+  const wajib = dayjs(jamWajibMasuk, "HH:mm:ss");
+  const diffMenit = masuk.diff(wajib, "minute");
+  return diffMenit > 0
+    ? `${Math.floor(diffMenit / 60)} jam ${diffMenit % 60} menit`
+    : "-";
 }
 
 module.exports = {
   generateTanggalKerja,
-  getJamKerja
+  getJamKerjaDetail,
+  hitungJamKerja,
+  hitungKeterlambatan
 };
